@@ -12,7 +12,9 @@ members = [
   "libsql-sys-tmp",
 
   "vendored/rusqlite",
-  "vendored/sqlite3-parser"
+  "vendored/sqlite3-parser",
+
+  "xtask",
 ]
 
 [profile.release]
