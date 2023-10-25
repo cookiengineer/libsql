@@ -22,14 +22,12 @@ impl Default for Statement {
 /// Classify statement in categories of interest.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum StmtKind {
-    /// The beginning of a transaction
+    /// The begining of a transaction
     TxnBegin,
     /// The end of a transaction
     TxnEnd,
     Read,
     Write,
-    Savepoint,
-    Release,
     Other,
 }
 
@@ -53,13 +51,7 @@ impl StmtKind {
             Cmd::Explain(_) => Some(Self::Other),
             Cmd::ExplainQueryPlan(_) => Some(Self::Other),
             Cmd::Stmt(Stmt::Begin { .. }) => Some(Self::TxnBegin),
-            Cmd::Stmt(
-                Stmt::Commit { .. }
-                | Stmt::Rollback {
-                    savepoint_name: None,
-                    ..
-                },
-            ) => Some(Self::TxnEnd),
+            Cmd::Stmt(Stmt::Commit { .. } | Stmt::Rollback { .. }) => Some(Self::TxnEnd),
             Cmd::Stmt(
                 Stmt::CreateVirtualTable { tbl_name, .. }
                 | Stmt::CreateTable {
@@ -107,12 +99,6 @@ impl StmtKind {
                 temporary: false, ..
             }) => Some(Self::Write),
             Cmd::Stmt(Stmt::DropView { .. }) => Some(Self::Write),
-            Cmd::Stmt(Stmt::Savepoint(_)) => Some(Self::Savepoint),
-            Cmd::Stmt(Stmt::Release(_))
-            | Cmd::Stmt(Stmt::Rollback {
-                savepoint_name: Some(_),
-                ..
-            }) => Some(Self::Release),
             _ => None,
         }
     }
@@ -181,27 +167,11 @@ impl StmtKind {
             },
         }
     }
-
-    /// Returns `true` if the stmt kind is [`Savepoint`].
-    ///
-    /// [`Savepoint`]: StmtKind::Savepoint
-    #[must_use]
-    pub fn is_savepoint(&self) -> bool {
-        matches!(self, Self::Savepoint)
-    }
-
-    /// Returns `true` if the stmt kind is [`Release`].
-    ///
-    /// [`Release`]: StmtKind::Release
-    #[must_use]
-    pub fn is_release(&self) -> bool {
-        matches!(self, Self::Release)
-    }
 }
 
 /// The state of a transaction for a series of statement
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum State {
+pub enum TxnStatus {
     /// The txn in an opened state
     Txn,
     /// The txn in a closed state
@@ -210,20 +180,21 @@ pub enum State {
     Invalid,
 }
 
-impl State {
+impl TxnStatus {
     pub fn step(&mut self, kind: StmtKind) {
         *self = match (*self, kind) {
-            (State::Txn, StmtKind::TxnBegin) | (State::Init, StmtKind::TxnEnd) => State::Invalid,
-            (State::Txn, StmtKind::TxnEnd) => State::Init,
+            (TxnStatus::Txn, StmtKind::TxnBegin) | (TxnStatus::Init, StmtKind::TxnEnd) => {
+                TxnStatus::Invalid
+            }
+            (TxnStatus::Txn, StmtKind::TxnEnd) => TxnStatus::Init,
             (state, StmtKind::Other | StmtKind::Write | StmtKind::Read) => state,
-            (State::Invalid, _) => State::Invalid,
-            (State::Init, StmtKind::TxnBegin) => State::Txn,
-            _ => State::Invalid,
+            (TxnStatus::Invalid, _) => TxnStatus::Invalid,
+            (TxnStatus::Init, StmtKind::TxnBegin) => TxnStatus::Txn,
         };
     }
 
     pub fn reset(&mut self) {
-        *self = State::Init
+        *self = TxnStatus::Init
     }
 }
 
@@ -307,11 +278,7 @@ impl Statement {
     pub fn is_read_only(&self) -> bool {
         matches!(
             self.kind,
-            StmtKind::Read
-                | StmtKind::TxnEnd
-                | StmtKind::TxnBegin
-                | StmtKind::Release
-                | StmtKind::Savepoint
+            StmtKind::Read | StmtKind::TxnEnd | StmtKind::TxnBegin
         )
     }
 }
@@ -319,9 +286,9 @@ impl Statement {
 /// Given a an initial state and an array of queries, attempts to predict what the final state will
 /// be
 pub fn predict_final_state<'a>(
-    mut state: State,
+    mut state: TxnStatus,
     stmts: impl Iterator<Item = &'a Statement>,
-) -> State {
+) -> TxnStatus {
     for stmt in stmts {
         state.step(stmt.kind);
     }

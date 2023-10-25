@@ -1,21 +1,19 @@
-use metrics::histogram;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 
 use futures::Future;
 use tokio::{sync::Semaphore, time::timeout};
 
 use crate::auth::Authenticated;
 use crate::error::Error;
-use crate::metrics::CONCCURENT_CONNECTIONS_COUNT;
 use crate::query::{Params, Query};
-use crate::query_analysis::{State, Statement};
+use crate::query_analysis::Statement;
 use crate::query_result_builder::{IgnoreResult, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::Result;
 
-use self::program::{Cond, DescribeResult, Program, Step};
+use self::program::{Cond, DescribeResponse, Program, Step};
 
 pub mod config;
 pub mod dump;
@@ -34,7 +32,7 @@ pub trait Connection: Send + Sync + 'static {
         auth: Authenticated,
         response_builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, State)>;
+    ) -> Result<B>;
 
     /// Execute all the queries in the batch sequentially.
     /// If an query in the batch fails, the remaining queries are ignores, and the batch current
@@ -45,12 +43,12 @@ pub trait Connection: Send + Sync + 'static {
         auth: Authenticated,
         result_builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, State)> {
+    ) -> Result<B> {
         let batch_len = batch.len();
         let mut steps = make_batch_program(batch);
 
         if !steps.is_empty() {
-            // We add a conditional rollback step if the last step was not successful.
+            // We add a conditional rollback step if the last step was not sucessful.
             steps.push(Step {
                 query: Query {
                     stmt: Statement::parse("ROLLBACK").next().unwrap().unwrap(),
@@ -69,11 +67,11 @@ pub trait Connection: Send + Sync + 'static {
 
         // ignore the rollback result
         let builder = result_builder.take(batch_len);
-        let (builder, state) = self
+        let builder = self
             .execute_program(pgm, auth, builder, replication_index)
             .await?;
 
-        Ok((builder.into_inner(), state))
+        Ok(builder.into_inner())
     }
 
     /// Execute all the queries in the batch sequentially.
@@ -84,7 +82,7 @@ pub trait Connection: Send + Sync + 'static {
         auth: Authenticated,
         result_builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, State)> {
+    ) -> Result<B> {
         let steps = make_batch_program(batch);
         let pgm = Program::new(steps);
         self.execute_program(pgm, auth, result_builder, replication_index)
@@ -113,7 +111,7 @@ pub trait Connection: Send + Sync + 'static {
         sql: String,
         auth: Authenticated,
         replication_index: Option<FrameNo>,
-    ) -> Result<DescribeResult>;
+    ) -> Result<Result<DescribeResponse>>;
 
     /// Check whether the connection is in autocommit mode.
     async fn is_autocommit(&self) -> Result<bool>;
@@ -251,7 +249,6 @@ impl<F: MakeConnection> MakeConnection for MakeThrottledConnection<F> {
     type Connection = TrackedConnection<F::Connection>;
 
     async fn create(&self) -> Result<Self::Connection, Error> {
-        let before_create = Instant::now();
         // If the memory pressure is high, request more units to reduce concurrency.
         tracing::trace!(
             "Available semaphore units: {}",
@@ -282,16 +279,10 @@ impl<F: MakeConnection> MakeConnection for MakeThrottledConnection<F> {
         }
 
         let inner = self.connection_maker.create().await?;
-
-        CONCCURENT_CONNECTIONS_COUNT.increment(1.0);
-        // CONNECTION_CREATE_TIME.record(before_create.elapsed());
-        histogram!("connection_create_time", before_create.elapsed());
-
         Ok(TrackedConnection {
             permit,
             inner,
             atime: AtomicU64::new(now_millis()),
-            created_at: Instant::now(),
         })
     }
 }
@@ -302,15 +293,6 @@ pub struct TrackedConnection<DB> {
     #[allow(dead_code)] // just hold on to it
     permit: tokio::sync::OwnedSemaphorePermit,
     atime: AtomicU64,
-    created_at: Instant,
-}
-
-impl<T> Drop for TrackedConnection<T> {
-    fn drop(&mut self) {
-        CONCCURENT_CONNECTIONS_COUNT.decrement(1.0);
-        histogram!("connection_create_time", self.created_at.elapsed());
-        // CONNECTION_ALIVE_DURATION.record();
-    }
 }
 
 impl<DB: Connection> TrackedConnection<DB> {
@@ -330,7 +312,7 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
         auth: Authenticated,
         builder: B,
         replication_index: Option<FrameNo>,
-    ) -> crate::Result<(B, State)> {
+    ) -> crate::Result<B> {
         self.atime.store(now_millis(), Ordering::Relaxed);
         self.inner
             .execute_program(pgm, auth, builder, replication_index)
@@ -343,7 +325,7 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
         sql: String,
         auth: Authenticated,
         replication_index: Option<FrameNo>,
-    ) -> crate::Result<DescribeResult> {
+    ) -> crate::Result<crate::Result<DescribeResponse>> {
         self.atime.store(now_millis(), Ordering::Relaxed);
         self.inner.describe(sql, auth, replication_index).await
     }
@@ -371,7 +353,7 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
 
     #[derive(Debug)]
@@ -385,7 +367,7 @@ mod test {
             _auth: Authenticated,
             _builder: B,
             _replication_index: Option<FrameNo>,
-        ) -> crate::Result<(B, State)> {
+        ) -> crate::Result<B> {
             unreachable!()
         }
 
@@ -394,7 +376,7 @@ mod test {
             _sql: String,
             _auth: Authenticated,
             _replication_index: Option<FrameNo>,
-        ) -> crate::Result<DescribeResult> {
+        ) -> crate::Result<crate::Result<DescribeResponse>> {
             unreachable!()
         }
 
