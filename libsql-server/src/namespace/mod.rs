@@ -22,12 +22,14 @@ use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 use tokio_util::io::StreamReader;
 use tonic::transport::Channel;
+use tracing::trace;
 use uuid::Uuid;
 
 use crate::auth::Authenticated;
 use crate::connection::config::DatabaseConfigStore;
 use crate::connection::libsql::{open_conn, MakeLibSqlConn};
 use crate::connection::write_proxy::MakeWriteProxyConn;
+use crate::connection::Connection;
 use crate::connection::MakeConnection;
 use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
 use crate::error::{Error, LoadDumpError};
@@ -491,6 +493,15 @@ impl<M: MakeNamespace> NamespaceStore<M> {
         Ok(())
     }
 
+    pub async fn shutdown(&self) -> crate::Result<()> {
+        let mut lock = self.inner.store.write().await;
+        for (name, ns) in lock.drain() {
+            ns.shutdown().await?;
+            trace!("shutdown namespace: `{}`", name);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn stats(&self, namespace: NamespaceName) -> crate::Result<Arc<Stats>> {
         self.with(namespace, |ns| ns.stats.clone()).await
     }
@@ -512,6 +523,7 @@ pub struct Namespace<T: Database> {
     tasks: JoinSet<anyhow::Result<()>>,
     stats: Arc<Stats>,
     db_config_store: Arc<DatabaseConfigStore>,
+    bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
 }
 
 impl<T: Database> Namespace<T> {
@@ -522,7 +534,30 @@ impl<T: Database> Namespace<T> {
     async fn destroy(mut self) -> anyhow::Result<()> {
         self.db.shutdown();
         self.tasks.shutdown().await;
+        Ok(())
+    }
 
+    async fn checkpoint(&self) -> anyhow::Result<()> {
+        let conn = self.db.connection_maker().create().await?;
+        if let Err(e) = conn.vacuum_if_needed().await {
+            tracing::warn!("vacuum failed: {}", e);
+        }
+        conn.checkpoint().await?;
+        Ok(())
+    }
+    async fn shutdown(mut self) -> anyhow::Result<()> {
+        self.tasks.shutdown().await;
+        self.checkpoint().await?;
+        let mut replicator = self.bottomless_replicator.clone();
+        if let Some(replicator) = replicator.as_mut() {
+            if let Ok(mut guard) = replicator.lock() {
+                guard
+                    .wait_until_snapshotted()
+                    .await
+                    .expect("wait_until_snapshotted failed");
+            }
+        }
+        self.db.shutdown();
         Ok(())
     }
 }
@@ -612,6 +647,7 @@ impl Namespace<ReplicaDatabase> {
             name,
             stats,
             db_config_store,
+            bottomless_replicator: None,
         })
     }
 }
@@ -805,6 +841,7 @@ impl Namespace<PrimaryDatabase> {
             name,
             stats,
             db_config_store,
+            bottomless_replicator: bottomless_replicator.clone(),
         })
     }
 }

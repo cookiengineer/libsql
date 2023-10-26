@@ -365,6 +365,7 @@ where
         let snapshot_callback = self.make_snapshot_callback();
         let auth = self.user_api_config.get_auth().map(Arc::new)?;
         let extensions = self.db_config.validate_extensions()?;
+        let mut primary_namespace_store: Option<NamespaceStore<PrimaryNamespaceMaker>> = None;
 
         match self.rpc_client_config {
             Some(rpc_config) => {
@@ -408,7 +409,7 @@ where
                     auth: auth.clone(),
                 };
                 let (namespaces, proxy_service, replication_service) = primary.configure().await?;
-
+                primary_namespace_store = Some(namespaces.clone());
                 let services = Services {
                     namespaces,
                     idle_shutdown_kicker,
@@ -430,6 +431,9 @@ where
         tokio::select! {
             _ = self.shutdown.notified() => {
                 join_set.shutdown().await;
+                if let Some(ns) = primary_namespace_store {
+                    ns.shutdown().await?;
+                }
                 // clean shutdown, remove sentinel file
                 std::fs::remove_file(sentinel_file_path(&self.path))?;
             }
