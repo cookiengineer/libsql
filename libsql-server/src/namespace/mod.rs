@@ -550,6 +550,7 @@ impl<T: Database> Namespace<T> {
         self.tasks.shutdown().await;
         self.checkpoint().await?;
         self.db.shutdown();
+        tracing::debug!("trying to acquire");
         if let Some(replicator_arc) = self.bottomless_replicator.take() {
             let replicator = Arc::into_inner(replicator_arc)
                 .expect("Failed to unwrap Arc")

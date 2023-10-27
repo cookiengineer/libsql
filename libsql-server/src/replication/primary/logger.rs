@@ -117,6 +117,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
 
             // do backup after log replication as we don't want to replicate potentially
             // inconsistent frames
+            tracing::debug!("acquiring arc @ 121");
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 if let Some(replicator) = replicator.lock().unwrap().as_mut() {
                     replicator.register_last_valid_frame(last_valid_frame);
@@ -127,6 +128,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     replicator.submit_frames(frame_count as u32);
                 }
             }
+            tracing::debug!("releasing arc @ 121");
 
             if let Err(e) = ctx.logger.log_file.write().maybe_compact(
                 ctx.logger.compactor.clone(),
@@ -160,6 +162,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
 
         {
             let ctx = Self::wal_extract_ctx(wal);
+            tracing::debug!("acquiring arc @ 164");
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 let last_valid_frame = unsafe { *wal_data };
                 if let Some(replicator) = replicator.lock().unwrap().as_mut() {
@@ -170,6 +173,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     replicator.rollback_to_frame(last_valid_frame);
                 }
             }
+            tracing::debug!("releasing arc @ 164");
         }
 
         rc
@@ -215,6 +219,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
         {
             let ctx = Self::wal_extract_ctx(wal);
             let runtime = tokio::runtime::Handle::current();
+            tracing::debug!("acquiring arc @ 221");
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 if let Some(replicator) = replicator.lock().unwrap().as_mut() {
                     let last_known_frame = replicator.last_known_frame();
@@ -224,6 +229,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                             "No committed changes in this generation, not snapshotting"
                         );
                         replicator.skip_snapshot_for_current_generation();
+                        tracing::debug!("releasing arc @ 221");
                         return SQLITE_OK;
                     }
                     if let Err(e) =
@@ -270,6 +276,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
         {
             let ctx = Self::wal_extract_ctx(wal);
             let runtime = tokio::runtime::Handle::current();
+            tracing::debug!("acquiring arc @ 278");
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 if let Some(replicator) = replicator.lock().unwrap().as_mut() {
                     let _prev = replicator.new_generation();
@@ -283,6 +290,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     }
                 }
             }
+            tracing::debug!("releasing arc @ 278");
         }
         SQLITE_OK
     }
