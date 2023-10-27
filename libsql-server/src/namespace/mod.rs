@@ -523,7 +523,8 @@ pub struct Namespace<T: Database> {
     tasks: JoinSet<anyhow::Result<()>>,
     stats: Arc<Stats>,
     db_config_store: Arc<DatabaseConfigStore>,
-    bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
+    bottomless_replicator:
+        Option<Arc<std::sync::Mutex<Option<bottomless::replicator::Replicator>>>>,
 }
 
 impl<T: Database> Namespace<T> {
@@ -549,15 +550,16 @@ impl<T: Database> Namespace<T> {
         self.tasks.shutdown().await;
         self.checkpoint().await?;
         if let Some(replicator_arc) = self.bottomless_replicator.take() {
-            let mut replicator = Arc::try_unwrap(replicator_arc)
+            let replicator = Arc::try_unwrap(replicator_arc)
                 .expect("Failed to unwrap Arc")
                 .into_inner()
                 .expect("Failed to unwrap Mutex");
-
-            replicator
-                .wait_until_snapshotted()
-                .await
-                .expect("wait_until_snapshotted failed");
+            if let Some(mut replicator) = replicator {
+                replicator
+                    .wait_until_snapshotted()
+                    .await
+                    .expect("wait_until_snapshotted failed");
+            }
         }
         self.db.shutdown();
         Ok(())
@@ -750,7 +752,7 @@ impl Namespace<PrimaryDatabase> {
             }
 
             is_dirty |= did_recover;
-            Some(Arc::new(std::sync::Mutex::new(replicator)))
+            Some(Arc::new(std::sync::Mutex::new(Some(replicator))))
         } else {
             None
         };

@@ -49,7 +49,8 @@ pub enum ReplicationLoggerHook {}
 pub struct ReplicationLoggerHookCtx {
     buffer: Vec<WalPage>,
     logger: Arc<ReplicationLogger>,
-    bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
+    bottomless_replicator:
+        Option<Arc<std::sync::Mutex<Option<bottomless::replicator::Replicator>>>>,
 }
 
 /// This implementation of WalHook intercepts calls to `on_frame`, and writes them to a
@@ -117,13 +118,14 @@ unsafe impl WalHook for ReplicationLoggerHook {
             // do backup after log replication as we don't want to replicate potentially
             // inconsistent frames
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
-                let mut replicator = replicator.lock().unwrap();
-                replicator.register_last_valid_frame(last_valid_frame);
-                if let Err(e) = replicator.set_page_size(page_size as usize) {
-                    tracing::error!("fatal error during backup: {e}, exiting");
-                    std::process::abort()
+                if let Some(replicator) = replicator.lock().unwrap().as_mut() {
+                    replicator.register_last_valid_frame(last_valid_frame);
+                    if let Err(e) = replicator.set_page_size(page_size as usize) {
+                        tracing::error!("fatal error during backup: {e}, exiting");
+                        std::process::abort()
+                    }
+                    replicator.submit_frames(frame_count as u32);
                 }
-                replicator.submit_frames(frame_count as u32);
             }
 
             if let Err(e) = ctx.logger.log_file.write().maybe_compact(
@@ -160,12 +162,13 @@ unsafe impl WalHook for ReplicationLoggerHook {
             let ctx = Self::wal_extract_ctx(wal);
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 let last_valid_frame = unsafe { *wal_data };
-                let mut replicator = replicator.lock().unwrap();
-                let prev_valid_frame = replicator.peek_last_valid_frame();
-                tracing::trace!(
+                if let Some(replicator) = replicator.lock().unwrap().as_mut() {
+                    let prev_valid_frame = replicator.peek_last_valid_frame();
+                    tracing::trace!(
                     "Savepoint: rolling back from frame {prev_valid_frame} to {last_valid_frame}",
                 );
-                replicator.rollback_to_frame(last_valid_frame);
+                    replicator.rollback_to_frame(last_valid_frame);
+                }
             }
         }
 
@@ -213,29 +216,33 @@ unsafe impl WalHook for ReplicationLoggerHook {
             let ctx = Self::wal_extract_ctx(wal);
             let runtime = tokio::runtime::Handle::current();
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
-                let mut replicator = replicator.lock().unwrap();
-                let last_known_frame = replicator.last_known_frame();
-                replicator.request_flush();
-                if last_known_frame == 0 {
-                    tracing::debug!("No committed changes in this generation, not snapshotting");
-                    replicator.skip_snapshot_for_current_generation();
-                    return SQLITE_OK;
-                }
-                if let Err(e) = runtime.block_on(replicator.wait_until_committed(last_known_frame))
-                {
-                    tracing::error!(
-                        "Failed to wait for S3 replicator to confirm {} frames backup: {}",
-                        last_known_frame,
-                        e
-                    );
-                    return SQLITE_IOERR_WRITE;
-                }
-                if let Err(e) = runtime.block_on(replicator.wait_until_snapshotted()) {
-                    tracing::error!(
+                if let Some(replicator) = replicator.lock().unwrap().as_mut() {
+                    let last_known_frame = replicator.last_known_frame();
+                    replicator.request_flush();
+                    if last_known_frame == 0 {
+                        tracing::debug!(
+                            "No committed changes in this generation, not snapshotting"
+                        );
+                        replicator.skip_snapshot_for_current_generation();
+                        return SQLITE_OK;
+                    }
+                    if let Err(e) =
+                        runtime.block_on(replicator.wait_until_committed(last_known_frame))
+                    {
+                        tracing::error!(
+                            "Failed to wait for S3 replicator to confirm {} frames backup: {}",
+                            last_known_frame,
+                            e
+                        );
+                        return SQLITE_IOERR_WRITE;
+                    }
+                    if let Err(e) = runtime.block_on(replicator.wait_until_snapshotted()) {
+                        tracing::error!(
                         "Failed to wait for S3 replicator to confirm database snapshot backup: {}",
                         e
                     );
-                    return SQLITE_IOERR_WRITE;
+                        return SQLITE_IOERR_WRITE;
+                    }
                 }
             }
         }
@@ -264,13 +271,16 @@ unsafe impl WalHook for ReplicationLoggerHook {
             let ctx = Self::wal_extract_ctx(wal);
             let runtime = tokio::runtime::Handle::current();
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
-                let mut replicator = replicator.lock().unwrap();
-                let _prev = replicator.new_generation();
-                if let Err(e) =
-                    runtime.block_on(async move { replicator.snapshot_main_db_file().await })
-                {
-                    tracing::error!("Failed to snapshot the main db file during checkpoint: {e}");
-                    return SQLITE_IOERR_WRITE;
+                if let Some(replicator) = replicator.lock().unwrap().as_mut() {
+                    let _prev = replicator.new_generation();
+                    if let Err(e) =
+                        runtime.block_on(async move { replicator.snapshot_main_db_file().await })
+                    {
+                        tracing::error!(
+                            "Failed to snapshot the main db file during checkpoint: {e}"
+                        );
+                        return SQLITE_IOERR_WRITE;
+                    }
                 }
             }
         }
@@ -289,7 +299,9 @@ pub struct WalPage {
 impl ReplicationLoggerHookCtx {
     pub fn new(
         logger: Arc<ReplicationLogger>,
-        bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
+        bottomless_replicator: Option<
+            Arc<std::sync::Mutex<Option<bottomless::replicator::Replicator>>>,
+        >,
     ) -> Self {
         if bottomless_replicator.is_some() {
             tracing::trace!("bottomless replication enabled");
