@@ -549,8 +549,9 @@ impl<T: Database> Namespace<T> {
     async fn shutdown(mut self) -> anyhow::Result<()> {
         self.tasks.shutdown().await;
         self.checkpoint().await?;
+        self.db.shutdown();
         if let Some(replicator_arc) = self.bottomless_replicator.take() {
-            let replicator = Arc::try_unwrap(replicator_arc)
+            let replicator = Arc::into_inner(replicator_arc)
                 .expect("Failed to unwrap Arc")
                 .into_inner()
                 .expect("Failed to unwrap Mutex");
@@ -561,7 +562,6 @@ impl<T: Database> Namespace<T> {
                     .expect("wait_until_snapshotted failed");
             }
         }
-        self.db.shutdown();
         Ok(())
     }
 }
