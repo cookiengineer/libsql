@@ -548,14 +548,16 @@ impl<T: Database> Namespace<T> {
     async fn shutdown(mut self) -> anyhow::Result<()> {
         self.tasks.shutdown().await;
         self.checkpoint().await?;
-        let mut replicator = self.bottomless_replicator.clone();
-        if let Some(replicator) = replicator.as_mut() {
-            if let Ok(mut guard) = replicator.lock() {
-                guard
-                    .wait_until_snapshotted()
-                    .await
-                    .expect("wait_until_snapshotted failed");
-            }
+        if let Some(replicator_arc) = self.bottomless_replicator.take() {
+            let mut replicator = Arc::try_unwrap(replicator_arc)
+                .expect("Failed to unwrap Arc")
+                .into_inner()
+                .expect("Failed to unwrap Mutex");
+
+            replicator
+                .wait_until_snapshotted()
+                .await
+                .expect("wait_until_snapshotted failed");
         }
         self.db.shutdown();
         Ok(())
