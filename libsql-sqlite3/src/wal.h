@@ -35,12 +35,9 @@ typedef struct libsql_wal libsql_wal;
 
 typedef struct libsql_wal_methods {
   int iVersion; /* Current version is 1, versioning is here for backward compatibility */
-  /* Open and close a connection to a write-ahead log. */
-  int (*xOpen)(sqlite3_vfs*, sqlite3_file* , const char*, int no_shm_mode, long long max_size, struct libsql_wal_methods*, libsql_wal**);
-  int (*xClose)(libsql_wal*, sqlite3* db, int sync_flags, int nBuf, unsigned char *zBuf);
 
   /* Set the limiting size of a WAL file. */
-  void (*xLimit)(libsql_wal*, long long limit);
+  void (*xLimit)(void* self, long long limit);
 
   /* Used by readers to open (lock) and close (unlock) a snapshot.  A 
   ** snapshot is like a read-transaction.  It is the state of the database
@@ -49,37 +46,37 @@ typedef struct libsql_wal_methods {
   ** write to or checkpoint the WAL.  sqlite3WalCloseSnapshot() closes the
   ** transaction and releases the lock.
   */
-  int (*xBeginReadTransaction)(libsql_wal *, int *);
-  void (*xEndReadTransaction)(libsql_wal *);
+  int (*xBeginReadTransaction)(void* self, int *);
+  void (*xEndReadTransaction)(void *);
 
   /* Read a page from the write-ahead log, if it is present. */
-  int (*xFindFrame)(libsql_wal *, unsigned int, unsigned int *);
-  int (*xReadFrame)(libsql_wal *, unsigned int, int, unsigned char *);
+  int (*xFindFrame)(void* self, unsigned int, unsigned int *);
+  int (*xReadFrame)(void* self, unsigned int, int, unsigned char *);
 
   /* If the WAL is not empty, return the size of the database. */
-  unsigned int (*xDbsize)(libsql_wal *pWal);
+  unsigned int (*xDbsize)(void* self);
 
   /* Obtain or release the WRITER lock. */
-  int (*xBeginWriteTransaction)(libsql_wal *pWal);
-  int (*xEndWriteTransaction)(libsql_wal *pWal);
+  int (*xBeginWriteTransaction)(void* self);
+  int (*xEndWriteTransaction)(void* self);
 
   /* Undo any frames written (but not committed) to the log */
-  int (*xUndo)(libsql_wal *pWal, int (*xUndo)(void *, unsigned int), void *pUndoCtx);
+  int (*xUndo)(void* self, int (*xUndo)(void *, unsigned int), void *pUndoCtx);
 
   /* Return an integer that records the current (uncommitted) write
   ** position in the WAL */
-  void (*xSavepoint)(libsql_wal *pWal, unsigned int *aWalData);
+  void (*xSavepoint)(void* self, unsigned int *aWalData);
 
   /* Move the write position of the WAL back to iFrame.  Called in
   ** response to a ROLLBACK TO command. */
-  int (*xSavepointUndo)(libsql_wal *pWal, unsigned int *aWalData);
+  int (*xSavepointUndo)(void* self, unsigned int *aWalData);
 
   /* Write a frame or frames to the log. */
-  int (*xFrames)(libsql_wal *pWal, int, libsql_pghdr *, unsigned int, int, int);
+  int (*xFrames)(void* self, int, libsql_pghdr *, unsigned int, int, int);
 
   /* Copy pages from the log to the database file */ 
   int (*xCheckpoint)(
-    libsql_wal *pWal,                      /* Write-ahead log connection */
+    void* self,                     /* Write-ahead log connection */
     sqlite3 *db,                    /* Check this handle's interrupt flag */
     int eMode,                      /* One of PASSIVE, FULL and RESTART */
     int (*xBusy)(void*),            /* Function to call when busy */
@@ -96,66 +93,42 @@ typedef struct libsql_wal_methods {
   ** sqlite3WalCallback() was called.  If no commits have occurred since
   ** the last call, then return 0.
   */
-  int (*xCallback)(libsql_wal *pWal);
+  int (*xCallback)(void* self);
 
   /* Tell the wal layer that an EXCLUSIVE lock has been obtained (or released)
   ** by the pager layer on the database file.
   */
-  int (*xExclusiveMode)(libsql_wal *pWal, int op);
+  int (*xExclusiveMode)(void* self, int op);
 
   /* Return true if the argument is non-NULL and the WAL module is using
   ** heap-memory for the wal-index. Otherwise, if the argument is NULL or the
   ** WAL module is using shared-memory, return false. 
   */
-  int (*xHeapMemory)(libsql_wal *pWal);
+  int (*xHeapMemory)(void* self);
 
   // Only needed with SQLITE_ENABLE_SNAPSHOT, but part of the ABI
-  int (*xSnapshotGet)(libsql_wal *pWal, sqlite3_snapshot **ppSnapshot);
-  void (*xSnapshotOpen)(libsql_wal *pWal, sqlite3_snapshot *pSnapshot);
-  int (*xSnapshotRecover)(libsql_wal *pWal);
-  int (*xSnapshotCheck)(libsql_wal *pWal, sqlite3_snapshot *pSnapshot);
-  void (*xSnapshotUnlock)(libsql_wal *pWal);
+  int (*xSnapshotGet)(void* self, sqlite3_snapshot **ppSnapshot);
+  void (*xSnapshotOpen)(void* self, sqlite3_snapshot *pSnapshot);
+  int (*xSnapshotRecover)(void* self);
+  int (*xSnapshotCheck)(void* self, sqlite3_snapshot *pSnapshot);
+  void (*xSnapshotUnlock)(void* self);
 
   // Only needed with SQLITE_ENABLE_ZIPVFS, but part of the ABI
   /* If the WAL file is not empty, return the number of bytes of content
   ** stored in each frame (i.e. the db page-size when the WAL was created).
   */
-  int (*xFramesize)(libsql_wal *pWal);
+  int (*xFramesize)(void* self);
 
 
   /* Return the sqlite3_file object for the WAL file */
-  sqlite3_file *(*xFile)(libsql_wal *pWal);
+  sqlite3_file *(*xFile)(void* self);
 
   // Only needed with  SQLITE_ENABLE_SETLK_TIMEOUT
-  int (*xWriteLock)(libsql_wal *pWal, int bLock);
+  int (*xWriteLock)(void* self, int bLock);
 
-  void (*xDb)(libsql_wal *pWal, sqlite3 *db);
-
-  /* Return the WAL pathname length based on the owning pager's pathname len.
-  ** For WAL implementations not based on a single file, 0 should be returned. */
-  int (*xPathnameLen)(int origPathname);
-
-  /* Get the WAL pathname to given buffer. Assumes that the buffer can hold
-  ** at least xPathnameLen bytes. For WAL implementations not based on a single file,
-  ** this operation can safely be a no-op.
-  ** */
-  void (*xGetWalPathname)(char *buf, const char *orig, int orig_len);
-
-  /*
-  ** This optional callback gets called before the main database file which owns
-  ** the WAL file is open. It is a good place for initialization routines, as WAL
-  ** is otherwise open lazily.
-  */
-  int (*xPreMainDbOpen)(libsql_wal_methods *methods, const char *main_db_path);
-
-  /* True if the implementation relies on shared memory routines (e.g. locks) */
-  int bUsesShm;
-
-  const char *zName;
-  struct libsql_wal_methods *pNext;
+  void (*xDb)(void* self, sqlite3 *db);
 } libsql_wal_methods;
 
-libsql_wal_methods* libsql_wal_methods_find(const char *zName);
 
 /* Object declarations */
 typedef struct WalIndexHdr WalIndexHdr;
@@ -190,11 +163,37 @@ struct WalIndexHdr {
   unsigned int aCksum[2];                  /* Checksum over all prior fields */
 };
 
+typedef struct libsql_create_wal libsql_create_wal;
+struct libsql_create_wal {
+  /* True if the implementation relies on shared memory routines (e.g. locks) */
+  int bUsesShm;
+
+  /*
+  ** This optional callback gets called before the main database file which owns
+  ** the WAL file is open. It is a good place for initialization routines, as WAL
+  ** is otherwise open lazily.
+  */
+  int (*xPreMainDbOpen)(void* self, const char *main_db_path, int main_db_path_len);
+
+  /* Open and close a connection to a write-ahead log. */
+  int (*xOpen)(void* self, sqlite3_vfs*, sqlite3_file*, int no_shm_mode, long long max_size, const char* zMainDbFileName, libsql_wal* out_wal);
+  int (*xClose)(void* self, void* wal, sqlite3* db, int sync_flags, int nBuf, unsigned char *zBuf);
+
+  /* destroy resources for this wal */
+  int (*xLogDestroy)(void* self, sqlite3_vfs *vfs, const char* zMainDbFileName);
+  /* returns whether this wal exists */
+  int (*xLogExists)(void* self, sqlite3_vfs *vfs, const char* zMainDbFileName, int* exist);
+  /* destructor for self*/
+  int (*xDestroy)(void* wal);
+
+  void* self;
+};
+
 /*
 ** An open write-ahead log file is represented by an instance of the
 ** following object.
 */
-struct libsql_wal {
+typedef struct sqlite3_wal {
   sqlite3_vfs *pVfs;                  /* The VFS used to create pDbFd */
   sqlite3_file *pDbFd;                /* File handle for the database file */
   sqlite3_file *pWalFd;               /* File handle for WAL file */
@@ -222,10 +221,13 @@ struct libsql_wal {
   unsigned char lockError;            /* True if a locking error has occurred */
   WalIndexHdr *pSnapshot;             /* Start transaction here if not NULL */
   sqlite3 *db;
-  libsql_wal_methods *pMethods;       /* Virtual methods for interacting with WAL */
-  void *pMethodsData;                 /* Optional context for private use of libsql_wal_methods */
+} sqlite3_wal;
+
+struct libsql_wal {
+    libsql_wal_methods methods; /* virtual wal methods */
+    void* self; /* methods receiver */
 };
 
-typedef struct libsql_wal libsql_wal;
+extern libsql_create_wal sqlite3_create_wal;
 
 #endif /* SQLITE_WAL_H */
