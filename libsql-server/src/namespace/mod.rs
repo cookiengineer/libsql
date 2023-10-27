@@ -277,20 +277,31 @@ impl<M: MakeNamespace> Clone for NamespaceStore<M> {
 
 struct NamespaceStoreInner<M: MakeNamespace> {
     store: RwLock<HashMap<NamespaceName, Namespace<M::Database>>>,
+    metadata: Mutex<Namespace<M::Database>>,
     /// The namespace factory, to create new namespaces.
     make_namespace: M,
     allow_lazy_creation: bool,
 }
 
 impl<M: MakeNamespace> NamespaceStore<M> {
-    pub fn new(make_namespace: M, allow_lazy_creation: bool) -> Self {
-        Self {
+    pub async fn new(make_namespace: M, allow_lazy_creation: bool) -> crate::Result<Self> {
+        let meta = make_namespace
+            .create(
+                NamespaceName("internal".into()),
+                RestoreOption::Latest,
+                true,
+                Box::new(|_| ()),
+            )
+            .await?;
+
+        Ok(Self {
             inner: Arc::new(NamespaceStoreInner {
                 store: Default::default(),
+                metadata: Mutex::new(meta),
                 make_namespace,
                 allow_lazy_creation,
             }),
-        }
+        })
     }
 
     pub async fn destroy(&self, namespace: NamespaceName) -> crate::Result<()> {
