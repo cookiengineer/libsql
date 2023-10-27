@@ -1,3 +1,6 @@
+mod fork;
+mod meta_store;
+
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
@@ -44,8 +47,8 @@ use crate::namespace::fork::PointInTimeRestore;
 pub use fork::ForkError;
 
 use self::fork::ForkTask;
+use self::meta_store::MetaStore;
 
-mod fork;
 pub type ResetCb = Box<dyn Fn(ResetOp) + Send + Sync + 'static>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -277,7 +280,7 @@ impl<M: MakeNamespace> Clone for NamespaceStore<M> {
 
 struct NamespaceStoreInner<M: MakeNamespace> {
     store: RwLock<HashMap<NamespaceName, Namespace<M::Database>>>,
-    metadata: Mutex<Namespace<M::Database>>,
+    metadata: MetaStore<M::Database>,
     /// The namespace factory, to create new namespaces.
     make_namespace: M,
     allow_lazy_creation: bool,
@@ -285,19 +288,12 @@ struct NamespaceStoreInner<M: MakeNamespace> {
 
 impl<M: MakeNamespace> NamespaceStore<M> {
     pub async fn new(make_namespace: M, allow_lazy_creation: bool) -> crate::Result<Self> {
-        let meta = make_namespace
-            .create(
-                NamespaceName("internal".into()),
-                RestoreOption::Latest,
-                true,
-                Box::new(|_| ()),
-            )
-            .await?;
+        let metadata = MetaStore::new(&make_namespace).await?;
 
         Ok(Self {
             inner: Arc::new(NamespaceStoreInner {
                 store: Default::default(),
-                metadata: Mutex::new(meta),
+                metadata,
                 make_namespace,
                 allow_lazy_creation,
             }),
@@ -516,7 +512,7 @@ impl<M: MakeNamespace> NamespaceStore<M> {
 
 /// A namespace isolates the resources pertaining to a database of type T
 #[derive(Debug)]
-pub struct Namespace<T: Database> {
+pub struct Namespace<T> {
     pub db: T,
     name: NamespaceName,
     /// The set of tasks associated with this namespace
